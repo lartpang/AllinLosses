@@ -1,7 +1,9 @@
 # AllinLosses
 Deep learning of all loss functions
 https://github.com/axjing/AllinLosses
->该仓库为常用效果较好的损失函数的集装箱，Pytotch实现，持续更新，保证每个方法都方便高效的使用，借鉴开源社区中的相关代码，实现接口、框架、方法的统一，方便使用与研究，欢迎star,另外也欢迎star:[AIAnClub](https://github.com/axjing/AIAnClub): https://github.com/axjing/AIAnClub,它为流行模型的算法实现
+>该仓库为常用效果较好的损失函数的集装箱，Pytotch实现，持续更新，保证每个方法都方便高效的使用，借鉴开源社区中的相关代码，实现接口、框架、方法的统一，方便使用与研究，欢迎star,另外也欢迎star:[AIAnClub](https://github.com/axjing/AIAnClub): https://github.com/axjing/AIAnClub
+它为流行模型的算法实现
+
 ![](https://gitee.com/axjing/AnImg/raw/master/AllinLosses.png)
 
 

@@ -924,14 +924,14 @@ class TverskyLoss(nn.Module):
         return -tversky
 
 
-class FocalTversky_loss(nn.Module):
+class FocalTverskyLoss(nn.Module):
     """
     paper: https://arxiv.org/pdf/1810.07842.pdf
     author code: https://github.com/nabsabraham/focal-tversky-unet/blob/347d39117c24540400dfe80d106d2fb06d2b99e1/losses.py#L65
     """
 
     def __init__(self, tversky_kwargs, gamma=0.75):
-        super(FocalTversky_loss, self).__init__()
+        super(FocalTverskyLoss, self).__init__()
         self.gamma = gamma
         self.tversky = TverskyLoss(**tversky_kwargs)
 

@@ -559,7 +559,7 @@ class TopKLoss(CrossentropyND):
 class GeneralizedDiceLoss(nn.Module):
     def __init__(self, apply_nonlin=None, smooth=1e-5):
         """
-        Generalized Dice;
+        Generalized Dice; TODO:注意，该类容易使loss产生-inf,发生在587行求解intersection时，暂时还没有分析出原因
         Copy from: https://github.com/LIVIAETS/surface-loss/blob/108bd9892adca476e6cdf424124bc6268707498e/losses.py#L29
         paper: https://arxiv.org/pdf/1707.03237.pdf
         tf code: https://github.com/NifTK/NiftyNet/blob/dev/niftynet/layer/loss_segmentation.py#L279
@@ -593,10 +593,10 @@ class GeneralizedDiceLoss(nn.Module):
             softmax_output = output
         # copy from https://github.com/LIVIAETS/surface-loss/blob/108bd9892adca476e6cdf424124bc6268707498e/losses.py#L29
         one_index, two_index = get_einsum_index(shp_x)
-        w: torch.Tensor = 1 / (einsum(one_index, y_onehot).type(torch.float32) + self.smooth) ** 2
+        w: torch.Tensor = 1 / (einsum(one_index, y_onehot).type(torch.float32) + 1e-10) ** 2
         intersection: torch.Tensor = w * einsum(two_index, softmax_output, y_onehot)
         union: torch.Tensor = w * (einsum(one_index, softmax_output) + einsum(one_index, y_onehot))
-        divided: torch.Tensor = 1 - 2 * (einsum("bc->b", intersection)) / (
+        divided: torch.Tensor = 1 - 2 * (einsum("bc->b", intersection)+ self.smooth) / (
                 einsum("bc->b", union) + self.smooth)
         gdc = divided.mean()
 
@@ -1073,6 +1073,20 @@ class DiceWithFocalLoss(nn.Module):
         return result
 
 
+class GeneralizedDiceWithFocalLoss(nn.Module):
+    def __init__(self):
+        super(GeneralizedDiceWithFocalLoss, self).__init__()
+        self.gdc = GeneralizedDiceLossV2(apply_nonlin=softmax_helper)
+        self.focal = FocalLoss(apply_nonlin=softmax_helper)
+
+    def forward(self, output, target):
+        gdc_loss = self.gdc(output, target)
+        focal_loss = self.focal(output, target)
+
+        result = 0.7*gdc_loss + 0.3*focal_loss
+        return result
+
+
 def lovasz_grad(gt_sorted):
     """
     Computes gradient of the Lovasz extension w.r.t sorted errors
@@ -1238,7 +1252,6 @@ class GeneralizedDiceWithBoundaryLoss(nn.Module):
         self.dc = SoftDiceLoss()
         self.bd = BoudaryLoss()
 
-
     def forward(self, output, target, alpha=0.01):
         dc_loss = self.dc(output, target)
         bd_loss = self.bd(output, target)
@@ -1303,7 +1316,7 @@ class HDLoss(nn.Module):
                 if output.device.type == "cuda":
                     y_onehot = y_onehot.cuda(output.device.index)
                 y_onehot.scatter_(1, target, 1)
-        # print('hd loss.py', output.shape, y_onehot.shape)
+        # print('hd loss_function.py', output.shape, y_onehot.shape)
 
         with torch.no_grad():
             output_shape = output.shape
@@ -1347,26 +1360,72 @@ class DiceWithHDLoss(nn.Module):
 
 
 if __name__ == "__main__":
-    output = torch.zeros(2, 2, 64, 64)
-    output[:, :, 10:20, 10:20] = 1
+    output = torch.zeros(2, 2, 64, 64,64)
+    output[:, 0, 10:20, 10:20, 10:20] = 0
+    output[:, 1, 12:20, 12:20, 12:20] = 1
 
-    target = torch.zeros(2, 64, 64)
+    target = torch.zeros(2, 64, 64,64)
     # target[:, 5:15, 5:15, 5:15] = 1
-    target[:, 10:20, 10:20] = 1
+    target[:, 10:20, 10:20, 10:20] = 1
 
-    dice_loss = SoftDiceLoss(smooth=1e-5)
-    dice_lv = dice_loss(output, target)
-    print(dice_lv)
+    # dice_loss = SoftDiceLoss(smooth=1e-5)
+    # dice_lv = dice_loss(output, target)
+    # print(dice_lv)
+    #
+    # gdl = GeneralizedDiceLoss()
+    # dice_lv = gdl(output, target)
+    # print(dice_lv)
+    # BDL = BoudaryLoss()
+    # print(BDL(output, target))
+    # para = dict(batch_dice=False, do_bg=True, smooth=1e-5)
+    # DBDL = DiceWithBoundaryLoss(para)
+    # print(DBDL(output, target))
+    # DHDL = DiceWithHDLoss(para)
+    # print(DHDL(output, target))
+    # GDBL = GeneralizedDiceWithBoundaryLoss()
+    # print(GDBL(output, target))
 
-    gdl = GeneralizedDiceLoss()
-    dice_lv = gdl(output, target)
-    print(dice_lv)
-    BDL = BoudaryLoss()
-    print(BDL(output, target))
-    para = dict(batch_dice=False, do_bg=True, smooth=1e-5)
-    DBDL = DiceWithBoundaryLoss(para)
-    print(DBDL(output, target))
-    DHDL = DiceWithHDLoss(para)
-    print(DHDL(output, target))
-    GDBL = GeneralizedDiceWithBoundaryLoss()
-    print(GDBL(output, target))
+    GDFL=GeneralizedDiceWithFocalLoss()
+    print(GDFL(output, target))
+# TODO ToDel
+#
+# def compute_gt_dtm(img_gt, out_shape):
+#     """
+#     compute the distance transform map of foreground in ground gruth.
+#     input: segmentation, shape = (batch_size, class, x, y, z)
+#     output: the foreground Distance Map (SDM)
+#     dtm(x) = 0; x in segmentation boundary
+#              inf|x-y|; x in segmentation
+#     """
+#
+#     fg_dtm = np.zeros(out_shape)
+#
+#     for b in range(out_shape[0]):  # batch size
+#         for c in range(1, out_shape[1]):  # class; exclude the background class
+#             posmask = img_gt[b][c].astype(np.bool)
+#             if posmask.any():
+#                 posdis = distance_transform_edt(posmask)
+#                 fg_dtm[b][c] = posdis
+#
+#     return fg_dtm
+#
+#
+# def compute_pred_dtm(img_gt, out_shape):
+#     """
+#     compute the distance transform map of foreground in prediction.
+#     input: segmentation, shape = (batch_size, class, x, y, z)
+#     output: the foreground Distance Map (SDM)
+#     dtm(x) = 0; x in segmentation boundary
+#              inf|x-y|; x in segmentation
+#     """
+#
+#     fg_dtm = np.zeros(out_shape)
+#
+#     for b in range(out_shape[0]):  # batch size
+#         for c in range(1, out_shape[1]):  # class; exclude the background class
+#             posmask = img_gt[b][c] > 0.5
+#             if posmask.any():
+#                 posdis = distance_transform_edt(posmask)
+#                 fg_dtm[b][c] = posdis
+#
+#     return fg_dtm

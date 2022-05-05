@@ -52,7 +52,41 @@ git clone https://github.com/axjing/AllinLosses.git
 from AllinLosses import *
 ```
 
-3. instantiation
+3. Instantiation Testing
+
+```python
+from AllinLosses.segment_losses import *
+if __name__ == "__main__":
+    output = torch.zeros(2, 2, 64, 64,64)
+    output[:, 0, 10:20, 10:20, 10:20] = 0
+    output[:, 1, 12:20, 12:20, 12:20] = 1
+
+    target = torch.zeros(2, 64, 64,64)
+    # target[:, 5:15, 5:15, 5:15] = 1
+    target[:, 10:20, 10:20, 10:20] = 1
+
+    dice_loss = SoftDiceLoss(smooth=1e-5)
+    dice_lv = dice_loss(output, target)
+    print(dice_lv)
+    
+    gdl = GeneralizedDiceLoss()
+    dice_lv = gdl(output, target)
+    print(dice_lv)
+    BDL = BoudaryLoss()
+    print(BDL(output, target))
+    para = dict(batch_dice=False, do_bg=True, smooth=1e-5)
+    DBDL = DiceWithBoundaryLoss(para)
+    print(DBDL(output, target))
+    DHDL = DiceWithHDLoss(para)
+    print(DHDL(output, target))
+    GDBL = GeneralizedDiceWithBoundaryLoss()
+    print(GDBL(output, target))
+
+    GDFL=GeneralizedDiceWithFocalLoss()
+    print(GDFL(output, target))
+# TODO ToDel
+
+```
 
 ## 关于loss函数的讲解：
 - [损失函数优缺点适用场景对比分析](https://mp.weixin.qq.com/s/hrxFWmPdZkZmyA9PdJZkxw)

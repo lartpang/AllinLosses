@@ -596,7 +596,7 @@ class GeneralizedDiceLoss(nn.Module):
         w: torch.Tensor = 1 / (einsum(one_index, y_onehot).type(torch.float32) + 1e-10) ** 2
         intersection: torch.Tensor = w * einsum(two_index, softmax_output, y_onehot)
         union: torch.Tensor = w * (einsum(one_index, softmax_output) + einsum(one_index, y_onehot))
-        divided: torch.Tensor = 1 - 2 * (einsum("bc->b", intersection)+ self.smooth) / (
+        divided: torch.Tensor = 1 - 2 * (einsum("bc->b", intersection) + self.smooth) / (
                 einsum("bc->b", union) + self.smooth)
         gdc = divided.mean()
 
@@ -995,7 +995,7 @@ class DiceWithCrossentropyNDLoss(nn.Module):
             result = ce_loss + dc_loss
         else:
             raise NotImplementedError("nah son")  # reserved for other stuff (later)
-        return result
+        return result,dc_loss,ce_loss
 
 
 class PenaltyGeneralizedDiceLoss(nn.Module):
@@ -1029,7 +1029,7 @@ class DiceWithTopKLoss(nn.Module):
             result = ce_loss + dc_loss
         else:
             raise NotImplementedError("nah son")  # reserved for other stuff (later?)
-        return result
+        return result,dc_loss,ce_loss
 
 
 class ExpLogLoss(nn.Module):
@@ -1070,7 +1070,7 @@ class DiceWithFocalLoss(nn.Module):
         focal_loss = self.focal(output, target)
 
         result = dc_loss + focal_loss
-        return result
+        return result, dc_loss, focal_loss
 
 
 class GeneralizedDiceWithFocalLoss(nn.Module):
@@ -1082,9 +1082,8 @@ class GeneralizedDiceWithFocalLoss(nn.Module):
     def forward(self, output, target):
         gdc_loss = self.gdc(output, target)
         focal_loss = self.focal(output, target)
-
-        result = 0.7*gdc_loss + 0.3*focal_loss
-        return result
+        result = gdc_loss + focal_loss
+        return result, gdc_loss, focal_loss
 
 
 def lovasz_grad(gt_sorted):
@@ -1234,14 +1233,14 @@ class DiceWithBoundaryLoss(nn.Module):
         self.dc = SoftDiceLoss(apply_nonlin=None, **soft_dice_kwargs)
         self.bd = BoudaryLoss()
 
-    def forward(self, output, target):
+    def forward(self, output, target, alpha=0.01):
         dc_loss = self.dc(output, target)
         bd_loss = self.bd(output, target)
         if self.aggregate == "sum":
-            result = 0.01 * dc_loss + (1 - 0.01) * bd_loss
+            result = alpha * dc_loss + (1 - alpha) * bd_loss
         else:
             raise NotImplementedError("nah son")
-        return result
+        return result, dc_loss, bd_loss
 
 
 class GeneralizedDiceWithBoundaryLoss(nn.Module):
@@ -1249,7 +1248,7 @@ class GeneralizedDiceWithBoundaryLoss(nn.Module):
         super(GeneralizedDiceWithBoundaryLoss, self).__init__()
         aggregate = "sum"
         self.aggregate = aggregate
-        self.dc = SoftDiceLoss()
+        self.dc = GeneralizedDiceLossV2()
         self.bd = BoudaryLoss()
 
     def forward(self, output, target, alpha=0.01):
@@ -1259,7 +1258,7 @@ class GeneralizedDiceWithBoundaryLoss(nn.Module):
             result = alpha * dc_loss + (1 - alpha) * bd_loss
         else:
             raise NotImplementedError("nah son")
-        return result
+        return result, dc_loss, bd_loss
 
 
 #####################################################
@@ -1356,15 +1355,15 @@ class DiceWithHDLoss(nn.Module):
             result = alpha * dc_loss + hd_loss
         else:
             raise NotImplementedError("nah son")
-        return result
+        return result, dc_loss, hd_loss
 
 
 if __name__ == "__main__":
-    output = torch.zeros(2, 2, 64, 64,64)
+    output = torch.zeros(2, 2, 64, 64, 64)
     output[:, 0, 10:20, 10:20, 10:20] = 0
     output[:, 1, 12:20, 12:20, 12:20] = 1
 
-    target = torch.zeros(2, 64, 64,64)
+    target = torch.zeros(2, 64, 64, 64)
     # target[:, 5:15, 5:15, 5:15] = 1
     target[:, 10:20, 10:20, 10:20] = 1
 
@@ -1385,47 +1384,5 @@ if __name__ == "__main__":
     # GDBL = GeneralizedDiceWithBoundaryLoss()
     # print(GDBL(output, target))
 
-    GDFL=GeneralizedDiceWithFocalLoss()
+    GDFL = GeneralizedDiceWithFocalLoss()
     print(GDFL(output, target))
-# TODO ToDel
-#
-# def compute_gt_dtm(img_gt, out_shape):
-#     """
-#     compute the distance transform map of foreground in ground gruth.
-#     input: segmentation, shape = (batch_size, class, x, y, z)
-#     output: the foreground Distance Map (SDM)
-#     dtm(x) = 0; x in segmentation boundary
-#              inf|x-y|; x in segmentation
-#     """
-#
-#     fg_dtm = np.zeros(out_shape)
-#
-#     for b in range(out_shape[0]):  # batch size
-#         for c in range(1, out_shape[1]):  # class; exclude the background class
-#             posmask = img_gt[b][c].astype(np.bool)
-#             if posmask.any():
-#                 posdis = distance_transform_edt(posmask)
-#                 fg_dtm[b][c] = posdis
-#
-#     return fg_dtm
-#
-#
-# def compute_pred_dtm(img_gt, out_shape):
-#     """
-#     compute the distance transform map of foreground in prediction.
-#     input: segmentation, shape = (batch_size, class, x, y, z)
-#     output: the foreground Distance Map (SDM)
-#     dtm(x) = 0; x in segmentation boundary
-#              inf|x-y|; x in segmentation
-#     """
-#
-#     fg_dtm = np.zeros(out_shape)
-#
-#     for b in range(out_shape[0]):  # batch size
-#         for c in range(1, out_shape[1]):  # class; exclude the background class
-#             posmask = img_gt[b][c] > 0.5
-#             if posmask.any():
-#                 posdis = distance_transform_edt(posmask)
-#                 fg_dtm[b][c] = posdis
-#
-#     return fg_dtm

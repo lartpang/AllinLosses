@@ -1,11 +1,11 @@
 # AllinLosses
+
+![](https://gitee.com/axjing/AnImg/raw/master/AllinLosses.png)
+
 Deep learning of all loss functions
 https://github.com/axjing/AllinLosses
 >该仓库为常用效果较好的损失函数的集装箱，Pytotch实现，持续更新，保证每个方法都方便高效的使用，借鉴开源社区中的相关代码，实现接口、框架、方法的统一，方便使用与研究，欢迎star,另外也欢迎star:[AIAnClub](https://github.com/axjing/AIAnClub): https://github.com/axjing/AIAnClub
 它为流行模型的算法实现
-
-![](https://gitee.com/axjing/AnImg/raw/master/AllinLosses.png)
-
 
 ## 更新内容：
 - 与分割任务有关的所有loss函数，经过严格测试，兼容2d和3d分割模型训练，拿来即用:
@@ -104,6 +104,9 @@ if __name__ == "__main__":
 - [Loss震荡剧烈原因及解决办法​](https://mp.weixin.qq.com/s/onVwjNEhciOqnxqFCSSoyQ)
 
 
+## 参考文献
+
+所有参考文献均在代码注释中写明，方式使用时理解、阅读
 
 >![欢迎关注：【未来现相】微信公众号！！！](https://gitee.com/axjing/AnImg/raw/master/20210808192034.png)
 

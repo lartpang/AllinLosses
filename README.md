@@ -37,6 +37,7 @@ https://github.com/axjing/AllinLosses
   - GeneralizedDiceWithBoundaryLoss
   - HDLoss
   - DiceWithHDLoss
+  - log_cosh_smooth `loss平滑`
 
 
 ## 使用方法

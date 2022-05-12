@@ -7,7 +7,7 @@ from torch.autograd import Variable
 from torch import einsum
 import torch.nn.functional as F
 import numpy as np
-from skimage import segmentation
+from skimage.segmentation import find_boundaries
 
 softmax_helper = lambda x: F.softmax(x, 1)
 
@@ -50,6 +50,15 @@ def sum_tensor(inp, axes, keepdim=False):
         for ax in sorted(axes, reverse=True):
             inp = inp.sum(int(ax))
     return inp
+
+
+def log_cosh_smooth(loss):
+    """
+    https://arxiv.org/pdf/2006.14822.pdf
+    :param loss:tenor.back
+    :return:
+    """
+    return torch.log((torch.exp(loss) + torch.exp(-loss)) / 2.0)
 
 
 def get_tp_fp_fn(output, target, axes=None, mask=None, square=False):
@@ -453,6 +462,19 @@ class WeightedCrossEntropyLossV2(torch.nn.Module):
     #     return class_weights
 
 
+# def flatten(tensor):
+#     """Flattens a given tensor such that the channel axis is first.
+#     The shapes are transformed as follows:
+#        (N, C, D, H, W) -> (C, N * D * H * W)
+#     """
+#     C = tensor.size(1)
+#     # new axis order
+#     axis_order = (1, 0) + tuple(range(2, tensor.dim()))
+#     # Transpose: (N, C, D, H, W) -> (C, N, D, H, W)
+#     transposed = tensor.permute(axis_order)
+#     # Flatten: (C, N, D, H, W) -> (C, N * D * H * W)
+#     transposed = transposed.contiguous()
+#     return transposed.view(C, -1)
 def flatten(tensor):
     """Flattens a given tensor such that the channel axis is first.
     The shapes are transformed as follows:
@@ -462,9 +484,8 @@ def flatten(tensor):
     # new axis order
     axis_order = (1, 0) + tuple(range(2, tensor.dim()))
     # Transpose: (N, C, D, H, W) -> (C, N, D, H, W)
-    transposed = tensor.permute(axis_order)
+    transposed = tensor.permute(axis_order).contiguous()
     # Flatten: (C, N, D, H, W) -> (C, N * D * H * W)
-    transposed = transposed.contiguous()
     return transposed.view(C, -1)
 
 
@@ -571,21 +592,22 @@ class GeneralizedDiceLoss(nn.Module):
 
     def forward(self, output, target):
         shp_x = output.shape  # (batch size,class_num,x,y,z)
-        shp_y = target.shape  # (batch size,1,x,y,z)
-        # one hot code for target
-        with torch.no_grad():
-            if len(shp_x) != len(shp_y):
-                target = target.view((shp_y[0], 1, *shp_y[1:]))
-
-            if all([i == j for i, j in zip(output.shape, target.shape)]):
-                # if this is the case then target is probably already a one hot encoding
-                y_onehot = target
-            else:
-                target = target.long()
-                y_onehot = torch.zeros(shp_x)
-                if output.device.type == "cuda":
-                    y_onehot = y_onehot.cuda(output.device.index)
-                y_onehot.scatter_(1, target, 1)
+        # shp_y = target.shape  # (batch size,1,x,y,z)
+        # # one hot code for target
+        # with torch.no_grad():
+        #     if len(shp_x) != len(shp_y):
+        #         target = target.view((shp_y[0], 1, *shp_y[1:]))
+        #
+        #     if all([i == j for i, j in zip(output.shape, target.shape)]):
+        #         # if this is the case then target is probably already a one hot encoding
+        #         y_onehot = target
+        #     else:
+        #         target = target.long()
+        #         y_onehot = torch.zeros(shp_x)
+        #         if output.device.type == "cuda":
+        #             y_onehot = y_onehot.cuda(output.device.index)
+        #         y_onehot.scatter_(1, target, 1)
+        y_onehot = gt2onehot(output, target)  # (b,x,y(,z))->(b,c,x,y(,z))
 
         if self.apply_nonlin is not None:
             softmax_output = self.apply_nonlin(output)
@@ -603,20 +625,6 @@ class GeneralizedDiceLoss(nn.Module):
         return gdc
 
 
-def flatten(tensor):
-    """Flattens a given tensor such that the channel axis is first.
-    The shapes are transformed as follows:
-       (N, C, D, H, W) -> (C, N * D * H * W)
-    """
-    C = tensor.size(1)
-    # new axis order
-    axis_order = (1, 0) + tuple(range(2, tensor.dim()))
-    # Transpose: (N, C, D, H, W) -> (C, N, D, H, W)
-    transposed = tensor.permute(axis_order).contiguous()
-    # Flatten: (C, N, D, H, W) -> (C, N * D * H * W)
-    return transposed.view(C, -1)
-
-
 class GeneralizedDiceLossV2(nn.Module):
     def __init__(self, apply_nonlin=None, smooth=1e-5):
         """
@@ -632,21 +640,23 @@ class GeneralizedDiceLossV2(nn.Module):
 
     def forward(self, output, target):
         shp_x = output.shape  # (batch size,class_num,x,y,z)
-        shp_y = target.shape  # (batch size,1,x,y,z)
-        # one hot code for target
-        with torch.no_grad():
-            if len(shp_x) != len(shp_y):
-                target = target.view((shp_y[0], 1, *shp_y[1:]))
+        # shp_y = target.shape  # (batch size,1,x,y,z)
+        # # one hot code for target
+        # with torch.no_grad():
+        #     if len(shp_x) != len(shp_y):
+        #         target = target.view((shp_y[0], 1, *shp_y[1:]))
+        #
+        #     if all([i == j for i, j in zip(output.shape, target.shape)]):
+        #         # if this is the case then target is probably already a one hot encoding
+        #         y_onehot = target
+        #     else:
+        #         target = target.long()
+        #         y_onehot = torch.zeros(shp_x)
+        #         if output.device.type == "cuda":
+        #             y_onehot = y_onehot.cuda(output.device.index)
+        #         y_onehot.scatter_(1, target, 1)
 
-            if all([i == j for i, j in zip(output.shape, target.shape)]):
-                # if this is the case then target is probably already a one hot encoding
-                y_onehot = target
-            else:
-                target = target.long()
-                y_onehot = torch.zeros(shp_x)
-                if output.device.type == "cuda":
-                    y_onehot = y_onehot.cuda(output.device.index)
-                y_onehot.scatter_(1, target, 1)
+        y_onehot = gt2onehot(output, target)  # (b,c,x,y,z)
 
         if self.apply_nonlin is not None:
             softmax_output = self.apply_nonlin(output)
@@ -686,27 +696,28 @@ class SensitivitySpecifityLoss(nn.Module):
 
     def forward(self, output, target, loss_mask=None):
         shp_x = output.shape
-        shp_y = target.shape
+        # shp_y = target.shape
         # class_num = shp_x[1]
 
-        with torch.no_grad():
-            if len(shp_x) != len(shp_y):
-                target = target.view((shp_y[0], 1, *shp_y[1:]))
-
-            if all([i == j for i, j in zip(output.shape, target.shape)]):
-                # if this is the case then target is probably already a one hot encoding
-                y_onehot = target
-            else:
-                target = target.long()
-                y_onehot = torch.zeros(shp_x)
-                if output.device.type == "cuda":
-                    y_onehot = y_onehot.cuda(output.device.index)
-                y_onehot.scatter_(1, target, 1)
+        # with torch.no_grad():
+        #     if len(shp_x) != len(shp_y):
+        #         target = target.view((shp_y[0], 1, *shp_y[1:]))
+        #
+        #     if all([i == j for i, j in zip(output.shape, target.shape)]):
+        #         # if this is the case then target is probably already a one hot encoding
+        #         y_onehot = target
+        #     else:
+        #         target = target.long()
+        #         y_onehot = torch.zeros(shp_x)
+        #         if output.device.type == "cuda":
+        #             y_onehot = y_onehot.cuda(output.device.index)
+        #         y_onehot.scatter_(1, target, 1)
 
         if self.batch_dice:
             axes = [0] + list(range(2, len(shp_x)))
         else:
             axes = list(range(2, len(shp_x)))
+        y_onehot = gt2onehot(output, target, axes)  # (b,c,x,y,z)
 
         if self.apply_nonlin is not None:
             softmax_output = self.apply_nonlin(output)
@@ -729,6 +740,39 @@ class SensitivitySpecifityLoss(nn.Module):
         ss = ss.mean()
 
         return ss
+
+
+def gt2onehot(output, target, axes=None):
+    """
+    output must be (b, c, x, y(, z)))
+    target must be a label map (shape (b, 1, x, y(, z)) OR shape (b, x, y(, z))) or one hot encoding (b, c, x, y(, z))
+    if mask is provided it must have shape (b, 1, x, y(, z)))
+    :param output:
+    :param target:
+    :param axes:
+    :return:
+    """
+    if axes is None:
+        axes = tuple(range(2, len(output.size())))
+
+    shp_x = output.shape
+    shp_y = target.shape
+
+    with torch.no_grad():
+        if len(shp_x) != len(shp_y):
+            target = target.view((shp_y[0], 1, *shp_y[1:]))
+
+        if all([i == j for i, j in zip(output.shape, target.shape)]):
+            # if this is the case then target is probably already a one hot encoding
+            y_onehot = target
+        else:
+            target = target.long()
+            y_onehot = torch.zeros(shp_x)
+            if output.device.type == "cuda":
+                y_onehot = y_onehot.cuda(output.device.index)
+            y_onehot.scatter_(1, target, 1)
+
+    return y_onehot
 
 
 class SoftDiceLoss(nn.Module):
@@ -768,39 +812,6 @@ class SoftDiceLoss(nn.Module):
         dc = dc.mean()
 
         return 1 - dc
-
-
-def gt2onehot(output, target, axes=None):
-    """
-    output must be (b, c, x, y(, z)))
-    target must be a label map (shape (b, 1, x, y(, z)) OR shape (b, x, y(, z))) or one hot encoding (b, c, x, y(, z))
-    if mask is provided it must have shape (b, 1, x, y(, z)))
-    :param output:
-    :param target:
-    :param axes:
-    :return:
-    """
-    if axes is None:
-        axes = tuple(range(2, len(output.size())))
-
-    shp_x = output.shape
-    shp_y = target.shape
-
-    with torch.no_grad():
-        if len(shp_x) != len(shp_y):
-            target = target.view((shp_y[0], 1, *shp_y[1:]))
-
-        if all([i == j for i, j in zip(output.shape, target.shape)]):
-            # if this is the case then target is probably already a one hot encoding
-            y_onehot = target
-        else:
-            target = target.long()
-            y_onehot = torch.zeros(shp_x)
-            if output.device.type == "cuda":
-                y_onehot = y_onehot.cuda(output.device.index)
-            y_onehot.scatter_(1, target, 1)
-
-    return y_onehot
 
 
 class SoftDiceLossV2(nn.Module):
@@ -995,7 +1006,7 @@ class DiceWithCrossentropyNDLoss(nn.Module):
             result = ce_loss + dc_loss
         else:
             raise NotImplementedError("nah son")  # reserved for other stuff (later)
-        return result,dc_loss,ce_loss
+        return result, dc_loss, ce_loss
 
 
 class PenaltyGeneralizedDiceLoss(nn.Module):
@@ -1029,7 +1040,7 @@ class DiceWithTopKLoss(nn.Module):
             result = ce_loss + dc_loss
         else:
             raise NotImplementedError("nah son")  # reserved for other stuff (later?)
-        return result,dc_loss,ce_loss
+        return result, dc_loss, ce_loss
 
 
 class ExpLogLoss(nn.Module):
@@ -1078,11 +1089,19 @@ class GeneralizedDiceWithFocalLoss(nn.Module):
         super(GeneralizedDiceWithFocalLoss, self).__init__()
         self.gdc = GeneralizedDiceLossV2(apply_nonlin=softmax_helper)
         self.focal = FocalLoss(apply_nonlin=softmax_helper)
+        self.smooth = False
 
     def forward(self, output, target):
         gdc_loss = self.gdc(output, target)
         focal_loss = self.focal(output, target)
-        result = gdc_loss + focal_loss
+        if target.dim() == 4:
+            target[target == 4] = 3  # label [2] -> [0]
+            target = expand_target(target, n_class=output.size()[1])  # [N,H,W,D] -> [N,1，H,W,D]
+        entropy_criterion = nn.BCEWithLogitsLoss()
+        bce_l = entropy_criterion(output, target)
+        result = gdc_loss + focal_loss + bce_l
+        if self.smooth:
+            result = log_cosh_smooth(result)
         return result, gdc_loss, focal_loss
 
 
@@ -1174,7 +1193,7 @@ def compute_sdf(img_gt, out_shape):
                 negmask = ~posmask
                 posdis = distance_transform_edt(posmask)
                 negdis = distance_transform_edt(negmask)
-                boundary = segmentation.find_boundaries(posmask, mode='inner').astype(np.uint8)
+                boundary = find_boundaries(posmask, mode='inner').astype(np.uint8)
                 sdf = negdis - posdis
                 sdf[boundary == 1] = 0
                 gt_sdf[b][c] = sdf
@@ -1199,20 +1218,21 @@ class BoudaryLoss(nn.Module):
         """
         if False: output = softmax_helper(output)
         out_shape = output.shape
-        with torch.no_grad():
-            if len(output.shape) != len(target.shape):
-                target = target.view((target.shape[0], 1, *target.shape[1:]))
-
-            if all([i == j for i, j in zip(output.shape, target.shape)]):
-                # if this is the case then target is probably already a one hot encoding
-                y_onehot = target
-            else:
-                target = target.long()
-                y_onehot = torch.zeros(output.shape)
-                if output.device.type == "cuda":
-                    y_onehot = y_onehot.cuda(output.device.index)
-                y_onehot.scatter_(1, target, 1)
-            gt_sdf = compute_sdf(y_onehot.cpu().numpy(), output.shape)
+        # with torch.no_grad():
+        #     if len(output.shape) != len(target.shape):
+        #         target = target.view((target.shape[0], 1, *target.shape[1:]))
+        #
+        #     if all([i == j for i, j in zip(output.shape, target.shape)]):
+        #         # if this is the case then target is probably already a one hot encoding
+        #         y_onehot = target
+        #     else:
+        #         target = target.long()
+        #         y_onehot = torch.zeros(output.shape)
+        #         if output.device.type == "cuda":
+        #             y_onehot = y_onehot.cuda(output.device.index)
+        #         y_onehot.scatter_(1, target, 1)
+        y_onehot = gt2onehot(output, target, axes)  # (b,c,x,y,z)
+        gt_sdf = compute_sdf(y_onehot.cpu().numpy(), out_shape)
 
         phi = torch.from_numpy(gt_sdf)
         if phi.device != output.device:
@@ -1301,21 +1321,23 @@ class HDLoss(nn.Module):
         target: ground truth, shape: (batch_size, c, x,y,z)
         """
         output = softmax_helper(output)
-        # one hot code for target
-        with torch.no_grad():
-            if len(output.shape) != len(target.shape):
-                target = target.view((target.shape[0], 1, *target.shape[1:]))
+        # # one hot code for target
+        # with torch.no_grad():
+        #     if len(output.shape) != len(target.shape):
+        #         target = target.view((target.shape[0], 1, *target.shape[1:]))
+        #
+        #     if all([i == j for i, j in zip(output.shape, target.shape)]):
+        #         # if this is the case then target is probably already a one hot encoding
+        #         y_onehot = target
+        #     else:
+        #         target = target.long()
+        #         y_onehot = torch.zeros(output.shape)
+        #         if output.device.type == "cuda":
+        #             y_onehot = y_onehot.cuda(output.device.index)
+        #         y_onehot.scatter_(1, target, 1)
+        # # print('hd loss_function.py', output.shape, y_onehot.shape)
 
-            if all([i == j for i, j in zip(output.shape, target.shape)]):
-                # if this is the case then target is probably already a one hot encoding
-                y_onehot = target
-            else:
-                target = target.long()
-                y_onehot = torch.zeros(output.shape)
-                if output.device.type == "cuda":
-                    y_onehot = y_onehot.cuda(output.device.index)
-                y_onehot.scatter_(1, target, 1)
-        # print('hd loss_function.py', output.shape, y_onehot.shape)
+        y_onehot = gt2onehot(output, target)  # (b,c,x,y,z)
 
         with torch.no_grad():
             output_shape = output.shape
@@ -1356,6 +1378,77 @@ class DiceWithHDLoss(nn.Module):
         else:
             raise NotImplementedError("nah son")
         return result, dc_loss, hd_loss
+
+
+def GeneralizedDiceLossV3(output, target, eps=1e-5, weight_type='square'):  # Generalized dice loss
+    """
+        该实现方式更容易理解多分类问题
+        Generalised Dice : 'Generalised dice overlap as a deep learning loss function for highly unbalanced segmentations'
+    """
+
+    # target = target.float()
+
+    if target.dim() == 4:
+        target[target == 4] = 3  # label [2] -> [0]
+        target = expand_target(target, n_class=output.size()[1])  # [N,H,W,D] -> [N,1，H,W,D]
+
+    # output = flatten(output)[1:, ...]  # transpose [N,1，H,W,D] -> [1，N,H,W,D] -> [3, N*H*W*D] voxels
+    output = flatten(output)[0:, ...]  # transpose [N,1，H,W,D] -> [1，N,H,W,D] -> [3, N*H*W*D] voxels
+    target = flatten(target)[0:, ...]  # [class, N*H*W*D]
+
+    target_sum = target.sum(-1)  # sub_class_voxels [3,1] -> 3个voxels
+    if weight_type == 'square':
+        class_weights = 1. / (target_sum * target_sum + eps)
+    elif weight_type == 'identity':
+        class_weights = 1. / (target_sum + eps)
+    elif weight_type == 'sqrt':
+        class_weights = 1. / (torch.sqrt(target_sum) + eps)
+    else:
+        raise ValueError('Check out the weight_type :', weight_type)
+
+    intersect = (output * target).sum(-1)
+    intersect_sum = (intersect * class_weights).sum()
+    denominator = (output + target).sum(-1)
+    denominator_sum = (denominator * class_weights).sum() + eps
+    # print("intersect_sum:{},\tdenominator_sum:{}".format(intersect_sum.data, denominator_sum.data))
+    loss = 1 - 2. * (intersect_sum / denominator_sum)
+
+    if len(intersect) == 3:
+        loss1 = 2 * intersect[0] / (denominator[0] + eps)
+        loss2 = 2 * intersect[1] / (denominator[1] + eps)
+        loss3 = 2 * intersect[2] / (denominator[2] + eps)
+        print(
+            '\n0:{:.4f} | 1:{:.4f} | 2:{:.4f} | - | Total loss:{:.4f}'.format(loss1.data, loss2.data, loss3.data,
+                                                                              loss.data))
+
+    return loss
+
+
+def expand_target(x, n_class, mode='softmax'):
+    """
+        Converts NxDxHxW label image to NxCxDxHxW, where each label is stored in a separate channel
+        :param input: 4D input image (NxDxHxW)
+        :param C: number of channels/labels
+        :return: 5D output image (NxCxDxHxW)
+    """
+    assert x.dim() == 4
+
+    shape = list(x.size())
+    shape.insert(1, n_class)
+    shape = tuple(shape)
+    xx = torch.zeros(shape)
+    if mode.lower() == 'softmax':
+        for c in range(n_class):
+            if c == 1:
+                xx[:, c, :, :, :] = (x >= c)  # 动脉+动脉瘤
+            else:
+                xx[:, c, :, :, :] = (x == c)
+
+    if mode.lower() == 'sigmoid':
+        xx[:, 0, :, :, :] = (x == 0)
+        xx[:, 1, :, :, :] = (x == 1)
+        xx[:, 2, :, :, :] = (x == 3)
+    return xx.to(x.device)
 
 
 if __name__ == "__main__":

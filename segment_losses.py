@@ -451,30 +451,7 @@ class WeightedCrossEntropyLossV2(torch.nn.Module):
         # print('*'*20)
         return F.cross_entropy(output, target)  # , weight=class_weights
 
-    # @staticmethod
-    # def _class_weights(input):
-    #     # normalize the input first
-    #     input = F.softmax(input, _stacklevel=5)
-    #     flattened = flatten(input)
-    #     nominator = (1. - flattened).sum(-1)
-    #     denominator = flattened.sum(-1)
-    #     class_weights = Variable(nominator / denominator, requires_grad=False)
-    #     return class_weights
 
-
-# def flatten(tensor):
-#     """Flattens a given tensor such that the channel axis is first.
-#     The shapes are transformed as follows:
-#        (N, C, D, H, W) -> (C, N * D * H * W)
-#     """
-#     C = tensor.size(1)
-#     # new axis order
-#     axis_order = (1, 0) + tuple(range(2, tensor.dim()))
-#     # Transpose: (N, C, D, H, W) -> (C, N, D, H, W)
-#     transposed = tensor.permute(axis_order)
-#     # Flatten: (C, N, D, H, W) -> (C, N * D * H * W)
-#     transposed = transposed.contiguous()
-#     return transposed.view(C, -1)
 def flatten(tensor):
     """Flattens a given tensor such that the channel axis is first.
     The shapes are transformed as follows:
@@ -592,21 +569,6 @@ class GeneralizedDiceLoss(nn.Module):
 
     def forward(self, output, target):
         shp_x = output.shape  # (batch size,class_num,x,y,z)
-        # shp_y = target.shape  # (batch size,1,x,y,z)
-        # # one hot code for target
-        # with torch.no_grad():
-        #     if len(shp_x) != len(shp_y):
-        #         target = target.view((shp_y[0], 1, *shp_y[1:]))
-        #
-        #     if all([i == j for i, j in zip(output.shape, target.shape)]):
-        #         # if this is the case then target is probably already a one hot encoding
-        #         y_onehot = target
-        #     else:
-        #         target = target.long()
-        #         y_onehot = torch.zeros(shp_x)
-        #         if output.device.type == "cuda":
-        #             y_onehot = y_onehot.cuda(output.device.index)
-        #         y_onehot.scatter_(1, target, 1)
         y_onehot = gt2onehot(output, target)  # (b,x,y(,z))->(b,c,x,y(,z))
 
         if self.apply_nonlin is not None:
@@ -639,22 +601,6 @@ class GeneralizedDiceLossV2(nn.Module):
         self.smooth = smooth
 
     def forward(self, output, target):
-        shp_x = output.shape  # (batch size,class_num,x,y,z)
-        # shp_y = target.shape  # (batch size,1,x,y,z)
-        # # one hot code for target
-        # with torch.no_grad():
-        #     if len(shp_x) != len(shp_y):
-        #         target = target.view((shp_y[0], 1, *shp_y[1:]))
-        #
-        #     if all([i == j for i, j in zip(output.shape, target.shape)]):
-        #         # if this is the case then target is probably already a one hot encoding
-        #         y_onehot = target
-        #     else:
-        #         target = target.long()
-        #         y_onehot = torch.zeros(shp_x)
-        #         if output.device.type == "cuda":
-        #             y_onehot = y_onehot.cuda(output.device.index)
-        #         y_onehot.scatter_(1, target, 1)
 
         y_onehot = gt2onehot(output, target)  # (b,c,x,y,z)
 
@@ -696,23 +642,6 @@ class SensitivitySpecifityLoss(nn.Module):
 
     def forward(self, output, target, loss_mask=None):
         shp_x = output.shape
-        # shp_y = target.shape
-        # class_num = shp_x[1]
-
-        # with torch.no_grad():
-        #     if len(shp_x) != len(shp_y):
-        #         target = target.view((shp_y[0], 1, *shp_y[1:]))
-        #
-        #     if all([i == j for i, j in zip(output.shape, target.shape)]):
-        #         # if this is the case then target is probably already a one hot encoding
-        #         y_onehot = target
-        #     else:
-        #         target = target.long()
-        #         y_onehot = torch.zeros(shp_x)
-        #         if output.device.type == "cuda":
-        #             y_onehot = y_onehot.cuda(output.device.index)
-        #         y_onehot.scatter_(1, target, 1)
-
         if self.batch_dice:
             axes = [0] + list(range(2, len(shp_x)))
         else:
@@ -1099,7 +1028,8 @@ class GeneralizedDiceWithFocalLoss(nn.Module):
             target = expand_target(target, n_class=output.size()[1])  # [N,H,W,D] -> [N,1，H,W,D]
         entropy_criterion = nn.BCEWithLogitsLoss()
         bce_l = entropy_criterion(output, target)
-        result = gdc_loss + focal_loss + bce_l
+        alpah = 0.8
+        result = gdc_loss + alpah * focal_loss + (1 - alpah) * bce_l
         if self.smooth:
             result = log_cosh_smooth(result)
         return result, gdc_loss, focal_loss
@@ -1218,20 +1148,8 @@ class BoudaryLoss(nn.Module):
         """
         if False: output = softmax_helper(output)
         out_shape = output.shape
-        # with torch.no_grad():
-        #     if len(output.shape) != len(target.shape):
-        #         target = target.view((target.shape[0], 1, *target.shape[1:]))
-        #
-        #     if all([i == j for i, j in zip(output.shape, target.shape)]):
-        #         # if this is the case then target is probably already a one hot encoding
-        #         y_onehot = target
-        #     else:
-        #         target = target.long()
-        #         y_onehot = torch.zeros(output.shape)
-        #         if output.device.type == "cuda":
-        #             y_onehot = y_onehot.cuda(output.device.index)
-        #         y_onehot.scatter_(1, target, 1)
-        y_onehot = gt2onehot(output, target, axes)  # (b,c,x,y,z)
+
+        y_onehot = gt2onehot(output, target)  # (b,c,x,y,z)
         gt_sdf = compute_sdf(y_onehot.cpu().numpy(), out_shape)
 
         phi = torch.from_numpy(gt_sdf)
@@ -1321,21 +1239,6 @@ class HDLoss(nn.Module):
         target: ground truth, shape: (batch_size, c, x,y,z)
         """
         output = softmax_helper(output)
-        # # one hot code for target
-        # with torch.no_grad():
-        #     if len(output.shape) != len(target.shape):
-        #         target = target.view((target.shape[0], 1, *target.shape[1:]))
-        #
-        #     if all([i == j for i, j in zip(output.shape, target.shape)]):
-        #         # if this is the case then target is probably already a one hot encoding
-        #         y_onehot = target
-        #     else:
-        #         target = target.long()
-        #         y_onehot = torch.zeros(output.shape)
-        #         if output.device.type == "cuda":
-        #             y_onehot = y_onehot.cuda(output.device.index)
-        #         y_onehot.scatter_(1, target, 1)
-        # # print('hd loss_function.py', output.shape, y_onehot.shape)
 
         y_onehot = gt2onehot(output, target)  # (b,c,x,y,z)
 

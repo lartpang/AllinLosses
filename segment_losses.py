@@ -52,6 +52,80 @@ def sum_tensor(inp, axes, keepdim=False):
     return inp
 
 
+def expand_target(x, n_class, mode='softmax'):
+    """
+        Converts NxDxHxW label image to NxCxDxHxW, where each label is stored in a separate channel
+        :param input: 4D input image (NxDxHxW)
+        :param C: number of channels/labels
+        :return: 5D output image (NxCxDxHxW)
+    """
+    assert x.dim() == 4
+
+    shape = list(x.size())
+    shape.insert(1, n_class)
+    shape = tuple(shape)
+    xx = torch.zeros(shape)
+    if mode.lower() == 'softmax':
+        for c in range(n_class):
+            if c == 1:
+                xx[:, c, :, :, :] = (x >= c)  # 两个标签重叠
+            else:
+                xx[:, c, :, :, :] = (x == c)
+
+    if mode.lower() == 'sigmoid':
+        xx[:, 0, :, :, :] = (x == 0)
+        xx[:, 1, :, :, :] = (x == 1)
+        xx[:, 2, :, :, :] = (x == 3)
+    return xx.to(x.device)
+
+
+def flatten(tensor):
+    """Flattens a given tensor such that the channel axis is first.
+    The shapes are transformed as follows:
+       (N, C, D, H, W) -> (C, N * D * H * W)
+    """
+    C = tensor.size(1)
+    # new axis order
+    axis_order = (1, 0) + tuple(range(2, tensor.dim()))
+    # Transpose: (N, C, D, H, W) -> (C, N, D, H, W)
+    transposed = tensor.permute(axis_order).contiguous()
+    # Flatten: (C, N, D, H, W) -> (C, N * D * H * W)
+    return transposed.view(C, -1)
+
+
+def mask2onehot(output, target, axes=None):
+    """
+    output must be (b, c, x, y(, z)))
+    target must be a label map (shape (b, 1, x, y(, z)) OR shape (b, x, y(, z))) or one hot encoding (b, c, x, y(, z))
+    if mask is provided it must have shape (b, 1, x, y(, z)))
+    :param output:
+    :param target:
+    :param axes:
+    :return:
+    """
+    if axes is None:
+        axes = tuple(range(2, len(output.size())))
+
+    shp_x = output.shape
+    shp_y = target.shape
+
+    with torch.no_grad():
+        if len(shp_x) != len(shp_y):
+            target = target.view((shp_y[0], 1, *shp_y[1:]))
+
+        if all([i == j for i, j in zip(output.shape, target.shape)]):
+            # if this is the case then target is probably already a one hot encoding
+            y_onehot = target
+        else:
+            target = target.long()
+            y_onehot = torch.zeros(shp_x)
+            if output.device.type == "cuda":
+                y_onehot = y_onehot.cuda(output.device.index)
+            y_onehot.scatter_(1, target, 1)
+
+    return y_onehot
+
+
 def log_cosh_smooth(loss):
     """
     https://arxiv.org/pdf/2006.14822.pdf
@@ -154,8 +228,6 @@ class FocalLoss(nn.Module):
             logit = logit.view(-1, logit.size(-1))
         target = torch.squeeze(target, 1)
         target = target.view(-1, 1)
-        # print(logit.shape, target.shape)
-        #
         alpha = self.alpha
 
         if alpha is None:
@@ -201,94 +273,7 @@ class FocalLoss(nn.Module):
         return loss
 
 
-class FocalLossV2(nn.Module):
-    """
-    copy from: https://github.com/Hsuxu/Loss_ToolBox-PyTorch/blob/master/FocalLoss/FocalLoss.py
-    This is a implementation of Focal Loss with smooth label cross entropy supported which is proposed in
-    'Focal Loss for Dense Object Detection. (https://arxiv.org/abs/1708.02002)'
-        Focal_Loss= -1*alpha*(1-pt)*log(pt)
-    :param num_class:
-    :param alpha: (tensor) 3D or 4D the scalar factor for this criterion
-    :param gamma: (float,double) gamma > 0 reduces the relative loss for well-classified examples (p>0.5) putting more
-                    focus on hard misclassified example
-    :param smooth: (float,double) smooth value when cross entropy
-    :param balance_index: (int) balance class index, should be specific when alpha is float
-    :param size_average: (bool, optional) By default, the losses are averaged over each loss element in the batch.
-    """
-
-    def __init__(self, apply_nonlin=None, alpha=None, gamma=2, balance_index=0, smooth=1e-5, size_average=True):
-        super(FocalLossV2, self).__init__()
-        self.apply_nonlin = apply_nonlin
-        self.alpha = alpha
-        self.gamma = gamma
-        self.balance_index = balance_index
-        self.smooth = smooth
-        self.size_average = size_average
-
-        if self.smooth is not None:
-            if self.smooth < 0 or self.smooth > 1.0:
-                raise ValueError('smooth value should be in [0,1]')
-
-    def forward(self, logit, target):
-        if self.apply_nonlin is not None:
-            logit = self.apply_nonlin(logit)
-        num_class = logit.shape[1]
-
-        if logit.dim() > 2:
-            # N,C,d1,d2 -> N,C,m (m=d1*d2*...)
-            logit = logit.view(logit.size(0), logit.size(1), -1)
-            logit = logit.permute(0, 2, 1).contiguous()
-            logit = logit.view(-1, logit.size(-1))
-        target = torch.squeeze(target, 1)
-        target = target.view(-1, 1)
-        # print(logit.shape, target.shape)
-        #
-        alpha = self.alpha
-
-        if alpha is None:
-            alpha = torch.ones(num_class, 1)
-        elif isinstance(alpha, (list, np.ndarray)):
-            assert len(alpha) == num_class
-            alpha = torch.FloatTensor(alpha).view(num_class, 1)
-            alpha = alpha / alpha.sum()
-        elif isinstance(alpha, float):
-            alpha = torch.ones(num_class, 1)
-            alpha = alpha * (1 - self.alpha)
-            alpha[self.balance_index] = self.alpha
-
-        else:
-            raise TypeError('Not support alpha type')
-
-        if alpha.device != logit.device:
-            alpha = alpha.to(logit.device)
-
-        idx = target.cpu().long()
-
-        one_hot_key = torch.FloatTensor(target.size(0), num_class).zero_()
-        one_hot_key = one_hot_key.scatter_(1, idx, 1)
-        if one_hot_key.device != logit.device:
-            one_hot_key = one_hot_key.to(logit.device)
-
-        if self.smooth:
-            one_hot_key = torch.clamp(
-                one_hot_key, self.smooth / (num_class - 1), 1.0 - self.smooth)
-        pt = (one_hot_key * logit).sum(1) + self.smooth
-        logpt = pt.log()
-
-        gamma = self.gamma
-
-        alpha = alpha[idx]
-        alpha = torch.squeeze(alpha)
-        loss = -1 * alpha * torch.pow((1 - pt), gamma) * logpt
-
-        if self.size_average:
-            loss = loss.mean()
-        else:
-            loss = loss.sum()
-        return loss
-
-
-class CrossentropyND(torch.nn.CrossEntropyLoss):
+class CrossentropyND(nn.CrossEntropyLoss):
     """
     Network has to have NO NONLINEARITY!
     """
@@ -313,7 +298,7 @@ class CrossentropyND(torch.nn.CrossEntropyLoss):
         return super(CrossentropyND, self).forward(inp, target)
 
 
-class CrossentropyNDTopK(torch.nn.CrossEntropyLoss):
+class CrossentropyNDTopK(nn.CrossEntropyLoss):
     """
     Network has to have NO NONLINEARITY!
     """
@@ -337,7 +322,7 @@ class CrossentropyNDTopK(torch.nn.CrossEntropyLoss):
 
         target = target.view(-1, )
 
-        return super(CrossentropyND, self).forward(inp, target)
+        return CrossentropyND()(inp, target)
 
 
 class TopKThreshold(CrossentropyND):
@@ -345,12 +330,12 @@ class TopKThreshold(CrossentropyND):
     Network has to have NO LINEARITY!
     """
 
-    def __init__(self, weight=None, ignore_index=-100, threshold=None):
+    def __init__(self, weight=None, ignore_index=-100, threshold=0.1):
         self.threshold = threshold
         super(TopKThreshold, self).__init__(weight, False, ignore_index, reduce=False)
 
     def forward(self, inp, target):
-        target = target[:, 0].long()
+        # target = target[:, 0].long()
         res = super(TopKThreshold, self).forward(inp, target)
         with torch.no_grad():
             prob = softmax_helper(inp)
@@ -372,7 +357,20 @@ class TopKThreshold(CrossentropyND):
         return res.mean()
 
 
-class WeightedCrossEntropyLoss(torch.nn.CrossEntropyLoss):
+class BWeightedCrossEntropyLoss(nn.Module):
+    def __init__(self):
+        super(BWeightedCrossEntropyLoss, self).__init__()
+
+    def forward(self, output, target):
+        if target.dim() == 4:
+            target[target == 4] = 3  # label [2] -> [0]
+            target = expand_target(target, n_class=output.size()[1])  # [N,H,W,D] -> [N,1,H,W,D]
+        entropy_criterion = nn.BCEWithLogitsLoss()
+        bce_l = entropy_criterion(output, target)
+        return bce_l
+
+
+class WeightedCrossEntropyLoss(nn.CrossEntropyLoss):
     """
     Network has to have NO NONLINEARITY!
     """
@@ -402,7 +400,7 @@ class WeightedCrossEntropyLoss(torch.nn.CrossEntropyLoss):
         return wce_loss(inp, target)
 
 
-class WeightedCrossEntropyLossV2(torch.nn.Module):
+class WeightedCrossEntropyLossV2(nn.Module):
     """
     WeightedCrossEntropyLoss (WCE) as described in https://arxiv.org/pdf/1707.03237.pdf
     Network has to have NO LINEARITY!
@@ -411,34 +409,17 @@ class WeightedCrossEntropyLossV2(torch.nn.Module):
 
     def forward(self, output, target):
         # compute weight
-        # shp_x = output.shape
-        # shp_y = target.shape
-        # print(shp_x, shp_y)
-        # with torch.no_grad():
-        #     if len(shp_x) != len(shp_y):
-        #         target = target.view((shp_y[0], 1, *shp_y[1:]))
+        y_onehot = mask2onehot(output, target)
+        y_onehot = y_onehot.transpose(0, 1).contiguous()
+        class_weights = (torch.einsum("cbxyz->c", y_onehot).type(torch.float32) + 1e-10) / torch.numel(y_onehot)
+        class_weights = class_weights.view(-1)
 
-        #     if all([i == j for i, j in zip(output.shape, target.shape)]):
-        #         # if this is the case then target is probably already a one hot encoding
-        #         y_onehot = target
-        #     else:
-        #         target = target.long()
-        #         y_onehot = torch.zeros(shp_x)
-        #         if output.device.type == "cuda":
-        #             y_onehot = y_onehot.cuda(output.device.index)
-        #         y_onehot.scatter_(1, target, 1)
-        # y_onehot = y_onehot.transpose(0,1).contiguous()
-        # class_weights = (torch.einsum("cbxyz->c", y_onehot).type(torch.float32) + 1e-10)/torch.numel(y_onehot)
-        # print('class_weights', class_weights)
-        # class_weights = class_weights.view(-1)
-        class_weights = torch.cuda.FloatTensor([0.2, 0.8])
         target = target.long()
         num_classes = output.size()[1]
         # class_weights = self._class_weights(inp)
 
         i0 = 1
         i1 = 2
-
         while i1 < len(output.shape):  # this is ugly but torch only allows to transpose two axes at once
             output = output.transpose(i0, i1)
             i0 += 1
@@ -448,22 +429,7 @@ class WeightedCrossEntropyLossV2(torch.nn.Module):
         output = output.view(-1, num_classes)  # shape=(vox_num, class_num)
 
         target = target.view(-1, )
-        # print('*'*20)
         return F.cross_entropy(output, target)  # , weight=class_weights
-
-
-def flatten(tensor):
-    """Flattens a given tensor such that the channel axis is first.
-    The shapes are transformed as follows:
-       (N, C, D, H, W) -> (C, N * D * H * W)
-    """
-    C = tensor.size(1)
-    # new axis order
-    axis_order = (1, 0) + tuple(range(2, tensor.dim()))
-    # Transpose: (N, C, D, H, W) -> (C, N, D, H, W)
-    transposed = tensor.permute(axis_order).contiguous()
-    # Flatten: (C, N, D, H, W) -> (C, N * D * H * W)
-    return transposed.view(C, -1)
 
 
 def compute_edts_forPenalizedLoss(target):
@@ -547,7 +513,7 @@ class TopKLoss(CrossentropyND):
         super(TopKLoss, self).__init__(weight, False, ignore_index, reduce=False)
 
     def forward(self, inp, target):
-        target = target[:, 0].long()
+        # target = target[:, 0].long()
         res = super(TopKLoss, self).forward(inp, target)
         num_voxels = np.prod(res.shape)
         res, _ = torch.topk(res.view((-1,)), int(num_voxels * self.k / 100), sorted=False)
@@ -557,7 +523,7 @@ class TopKLoss(CrossentropyND):
 class GeneralizedDiceLoss(nn.Module):
     def __init__(self, apply_nonlin=None, smooth=1e-5):
         """
-        Generalized Dice; TODO:注意，该类容易使loss产生-inf,发生在587行求解intersection时，暂时还没有分析出原因
+        Generalized Dice; TODO:注意，该类容易时loss产生-inf,发生在求解intersection时，暂时还没有分析出原因
         Copy from: https://github.com/LIVIAETS/surface-loss/blob/108bd9892adca476e6cdf424124bc6268707498e/losses.py#L29
         paper: https://arxiv.org/pdf/1707.03237.pdf
         tf code: https://github.com/NifTK/NiftyNet/blob/dev/niftynet/layer/loss_segmentation.py#L279
@@ -569,17 +535,18 @@ class GeneralizedDiceLoss(nn.Module):
 
     def forward(self, output, target):
         shp_x = output.shape  # (batch size,class_num,x,y,z)
-        y_onehot = gt2onehot(output, target)  # (b,x,y(,z))->(b,c,x,y(,z))
+        y_onehot = mask2onehot(output, target)  # (b,x,y(,z))->(b,c,x,y(,z))
 
         if self.apply_nonlin is not None:
-            softmax_output = self.apply_nonlin(output)
-        else:
-            softmax_output = output
+            output = self.apply_nonlin(output)
+
         # copy from https://github.com/LIVIAETS/surface-loss/blob/108bd9892adca476e6cdf424124bc6268707498e/losses.py#L29
         one_index, two_index = get_einsum_index(shp_x)
-        w: torch.Tensor = 1 / (einsum(one_index, y_onehot).type(torch.float32) + 1e-10) ** 2
-        intersection: torch.Tensor = w * einsum(two_index, softmax_output, y_onehot)
-        union: torch.Tensor = w * (einsum(one_index, softmax_output) + einsum(one_index, y_onehot))
+        w: torch.Tensor = 1 / (einsum(one_index, y_onehot).type(torch.float32) + self.smooth) ** 2
+        # TODO 该类容易时loss产生-inf,发生在求解intersection时，暂时还没有分析出原因
+        intersection: torch.Tensor = w * einsum(two_index, output, y_onehot)
+
+        union: torch.Tensor = w * (einsum(one_index, output) + einsum(one_index, y_onehot))
         divided: torch.Tensor = 1 - 2 * (einsum("bc->b", intersection) + self.smooth) / (
                 einsum("bc->b", union) + self.smooth)
         gdc = divided.mean()
@@ -601,15 +568,12 @@ class GeneralizedDiceLossV2(nn.Module):
         self.smooth = smooth
 
     def forward(self, output, target):
-
-        y_onehot = gt2onehot(output, target)  # (b,c,x,y,z)
+        y_onehot = mask2onehot(output, target)  # (b,c,x,y,z)
 
         if self.apply_nonlin is not None:
-            softmax_output = self.apply_nonlin(output)
-        else:
-            softmax_output = output
+            output = self.apply_nonlin(output)
 
-        input = flatten(softmax_output)
+        input = flatten(output)
         target = flatten(y_onehot)
         target = target.float()
         target_sum = target.sum(-1)
@@ -621,6 +585,44 @@ class GeneralizedDiceLossV2(nn.Module):
         denominator = ((input + target).sum(-1) * class_weights).sum()
 
         return 1. - 2. * intersect / denominator.clamp(min=self.smooth)
+
+
+class GeneralizedDiceLossV3(nn.Module):
+    def __init__(self, apply_nonlin=None, eps=1e-5, weight_type='square'):
+        super(GeneralizedDiceLossV3, self).__init__()
+        self.apply_nonlin = apply_nonlin
+        self.eps = eps
+        self.weight_type = weight_type
+
+    def forward(self, output, target):
+        # target = target.float()
+        num_cls = output.size()[1]
+        if self.apply_nonlin is not None:
+            output = self.apply_nonlin(output)
+        if target.dim() == 4:
+            target[target == 4] = 3  # label [2] -> [0]
+            target = expand_target(target, n_class=num_cls)  # [N,H,W,D] -> [N,1，H,W,D]
+
+        output = flatten(output)[0:, ...]  # transpose [N,1，H,W,D] -> [1，N,H,W,D] -> [3, N*H*W*D] voxels
+        target = flatten(target)[0:, ...]  # [class, N*H*W*D]
+
+        target_sum = target.sum(-1)  # sub_class_voxels [3,1] -> 3个voxels
+        if self.weight_type == 'square':
+            class_weights = 1. / (target_sum * target_sum + self.eps)
+        elif self.weight_type == 'identity':
+            class_weights = 1. / (target_sum + self.eps)
+        elif self.weight_type == 'sqrt':
+            class_weights = 1. / (torch.sqrt(target_sum) + self.eps)
+        else:
+            raise ValueError('Check out the weight_type :', self.weight_type)
+
+        intersect = (output * target).sum(-1)
+        intersect_sum = (intersect * class_weights).sum()
+        denominator = (output + target).sum(-1)
+        denominator_sum = (denominator * class_weights).sum() + self.eps
+        loss = 1 - 2. * (intersect_sum / denominator_sum)
+
+        return loss
 
 
 class SensitivitySpecifityLoss(nn.Module):
@@ -646,16 +648,14 @@ class SensitivitySpecifityLoss(nn.Module):
             axes = [0] + list(range(2, len(shp_x)))
         else:
             axes = list(range(2, len(shp_x)))
-        y_onehot = gt2onehot(output, target, axes)  # (b,c,x,y,z)
+        y_onehot = mask2onehot(output, target, axes)  # (b,c,x,y,z)
 
         if self.apply_nonlin is not None:
-            softmax_output = self.apply_nonlin(output)
-        else:
-            softmax_output = output
+            output = self.apply_nonlin(output)
 
         # no object value
         bg_onehot = 1 - y_onehot
-        squared_error = (y_onehot - softmax_output) ** 2
+        squared_error = (y_onehot - output) ** 2
         specificity_part = sum_tensor(squared_error * y_onehot, axes) / (sum_tensor(y_onehot, axes) + self.smooth)
         sensitivity_part = sum_tensor(squared_error * bg_onehot, axes) / (sum_tensor(bg_onehot, axes) + self.smooth)
 
@@ -669,39 +669,6 @@ class SensitivitySpecifityLoss(nn.Module):
         ss = ss.mean()
 
         return ss
-
-
-def gt2onehot(output, target, axes=None):
-    """
-    output must be (b, c, x, y(, z)))
-    target must be a label map (shape (b, 1, x, y(, z)) OR shape (b, x, y(, z))) or one hot encoding (b, c, x, y(, z))
-    if mask is provided it must have shape (b, 1, x, y(, z)))
-    :param output:
-    :param target:
-    :param axes:
-    :return:
-    """
-    if axes is None:
-        axes = tuple(range(2, len(output.size())))
-
-    shp_x = output.shape
-    shp_y = target.shape
-
-    with torch.no_grad():
-        if len(shp_x) != len(shp_y):
-            target = target.view((shp_y[0], 1, *shp_y[1:]))
-
-        if all([i == j for i, j in zip(output.shape, target.shape)]):
-            # if this is the case then target is probably already a one hot encoding
-            y_onehot = target
-        else:
-            target = target.long()
-            y_onehot = torch.zeros(shp_x)
-            if output.device.type == "cuda":
-                y_onehot = y_onehot.cuda(output.device.index)
-            y_onehot.scatter_(1, target, 1)
-
-    return y_onehot
 
 
 class SoftDiceLoss(nn.Module):
@@ -744,7 +711,7 @@ class SoftDiceLoss(nn.Module):
 
 
 class SoftDiceLossV2(nn.Module):
-    def __init__(self, apply_nonlin=None, batch_dice=False, do_bg=True, smooth=1.):
+    def __init__(self, apply_nonlin=None, batch_dice=False, do_bg=True, smooth=1e-5):
         """
         paper: Milletari et al. https://arxiv.org/abs/1606.04797
         """
@@ -755,8 +722,8 @@ class SoftDiceLossV2(nn.Module):
         self.apply_nonlin = apply_nonlin
         self.smooth = smooth
 
-    def forward(self, x, y):
-        shp_x = x.shape
+    def forward(self, output, target):
+        shp_x = output.shape
 
         if self.batch_dice:
             axes = [0] + list(range(2, len(shp_x)))
@@ -764,9 +731,9 @@ class SoftDiceLossV2(nn.Module):
             axes = list(range(2, len(shp_x)))
 
         if self.apply_nonlin is not None:
-            output = self.apply_nonlin(x)  # (b,c,x,y,z)
+            output = self.apply_nonlin(output)  # (b,c,x,y,z)
 
-        gt_onehot = gt2onehot(output, y, axes)  # (b,c,x,y,z)
+        gt_onehot = mask2onehot(output, target, axes)  # (b,c,x,y,z)
 
         intersection = sum_tensor(output * gt_onehot, axes, keepdim=False)
         ground_o = sum_tensor(gt_onehot ** 2, axes, keepdim=False)
@@ -780,7 +747,7 @@ class SoftDiceLossV2(nn.Module):
                 dc = dc[:, 1:]
         dc = dc.mean()
 
-        return - dc
+        return 1 - dc
 
 
 class IoULoss(nn.Module):
@@ -820,7 +787,7 @@ class IoULoss(nn.Module):
                 iou = iou[:, 1:]
         iou = iou.mean()
 
-        return -iou
+        return 1 - iou
 
 
 class TverskyLoss(nn.Module):
@@ -861,7 +828,7 @@ class TverskyLoss(nn.Module):
                 tversky = tversky[:, 1:]
         tversky = tversky.mean()
 
-        return -tversky
+        return 1 - tversky
 
 
 class FocalTverskyLoss(nn.Module):
@@ -870,9 +837,11 @@ class FocalTverskyLoss(nn.Module):
     author code: https://github.com/nabsabraham/focal-tversky-unet/blob/347d39117c24540400dfe80d106d2fb06d2b99e1/losses.py#L65
     """
 
-    def __init__(self, tversky_kwargs, gamma=0.75):
+    def __init__(self, gamma=0.75):
         super(FocalTverskyLoss, self).__init__()
         self.gamma = gamma
+        tversky_kwargs = dict(apply_nonlin=None, batch_dice=False, do_bg=True, smooth=1.,
+                              square=False)
         self.tversky = TverskyLoss(**tversky_kwargs)
 
     def forward(self, output, target):
@@ -918,24 +887,7 @@ class AsymLoss(nn.Module):
                 asym = asym[:, 1:]
         asym = asym.mean()
 
-        return -asym
-
-
-class DiceWithCrossentropyNDLoss(nn.Module):
-    def __init__(self, soft_dice_kwargs, ce_kwargs, aggregate="sum"):
-        super(DiceWithCrossentropyNDLoss, self).__init__()
-        self.aggregate = aggregate
-        self.ce = CrossentropyND(**ce_kwargs)
-        self.dc = SoftDiceLoss(apply_nonlin=softmax_helper, **soft_dice_kwargs)
-
-    def forward(self, output, target):
-        dc_loss = self.dc(output, target)
-        ce_loss = self.ce(output, target)
-        if self.aggregate == "sum":
-            result = ce_loss + dc_loss
-        else:
-            raise NotImplementedError("nah son")  # reserved for other stuff (later)
-        return result, dc_loss, ce_loss
+        return 1 - asym
 
 
 class PenaltyGeneralizedDiceLoss(nn.Module):
@@ -943,10 +895,10 @@ class PenaltyGeneralizedDiceLoss(nn.Module):
     paper: https://openreview.net/forum?id=H1lTh8unKN
     """
 
-    def __init__(self, gdice_kwargs):
+    def __init__(self, smooth=1e-5):
         super(PenaltyGeneralizedDiceLoss, self).__init__()
         self.k = 2.5
-        self.gdc = GeneralizedDiceLoss(apply_nonlin=softmax_helper, **gdice_kwargs)
+        self.gdc = GeneralizedDiceLoss(apply_nonlin=softmax_helper, smooth=smooth)
 
     def forward(self, output, target):
         gdc_loss = self.gdc(output, target)
@@ -978,8 +930,11 @@ class ExpLogLoss(nn.Module):
     https://arxiv.org/pdf/1809.00076.pdf
     """
 
-    def __init__(self, soft_dice_kwargs, wce_kwargs, gamma=0.3):
+    def __init__(self, gamma=0.3):
         super(ExpLogLoss, self).__init__()
+        soft_dice_kwargs = dict(batch_dice=False, do_bg=True, smooth=1e-5,
+                                square=False)
+        wce_kwargs = dict(weight=None)
         self.wce = WeightedCrossEntropyLoss(**wce_kwargs)
         self.dc = SoftDiceLoss(apply_nonlin=softmax_helper, **soft_dice_kwargs)
         self.gamma = gamma
@@ -999,42 +954,6 @@ class ExpLogLoss(nn.Module):
         return explog_loss
 
 
-class DiceWithFocalLoss(nn.Module):
-    def __init__(self, soft_dice_kwargs, focal_kwargs):
-        super(DiceWithFocalLoss, self).__init__()
-        self.dc = SoftDiceLoss(apply_nonlin=softmax_helper, **soft_dice_kwargs)
-        self.focal = FocalLoss(apply_nonlin=softmax_helper, **focal_kwargs)
-
-    def forward(self, output, target):
-        dc_loss = self.dc(output, target)
-        focal_loss = self.focal(output, target)
-
-        result = dc_loss + focal_loss
-        return result, dc_loss, focal_loss
-
-
-class GeneralizedDiceWithFocalLoss(nn.Module):
-    def __init__(self):
-        super(GeneralizedDiceWithFocalLoss, self).__init__()
-        self.gdc = GeneralizedDiceLossV2(apply_nonlin=softmax_helper)
-        self.focal = FocalLoss(apply_nonlin=softmax_helper)
-        self.smooth = False
-
-    def forward(self, output, target):
-        gdc_loss = self.gdc(output, target)
-        focal_loss = self.focal(output, target)
-        if target.dim() == 4:
-            target[target == 4] = 3  # label [2] -> [0]
-            target = expand_target(target, n_class=output.size()[1])  # [N,H,W,D] -> [N,1，H,W,D]
-        entropy_criterion = nn.BCEWithLogitsLoss()
-        bce_l = entropy_criterion(output, target)
-        alpah = 0.8
-        result = gdc_loss + alpah * focal_loss + (1 - alpah) * bce_l
-        if self.smooth:
-            result = log_cosh_smooth(result)
-        return result, gdc_loss, focal_loss
-
-
 def lovasz_grad(gt_sorted):
     """
     Computes gradient of the Lovasz extension w.r.t sorted errors
@@ -1051,6 +970,8 @@ def lovasz_grad(gt_sorted):
 
 
 class LovaszSoftmax(nn.Module):
+    """https://arxiv.org/pdf/1705.08790.pdf"""
+
     def __init__(self, reduction='mean'):
         super(LovaszSoftmax, self).__init__()
         self.reduction = reduction
@@ -1076,10 +997,10 @@ class LovaszSoftmax(nn.Module):
                 output_c = output[:, 0]
             else:
                 output_c = output[:, c]
-            loss_c = (torch.autograd.Variable(target_c) - output_c).abs()
+            loss_c = (Variable(target_c) - output_c).abs()
             loss_c_sorted, loss_index = torch.sort(loss_c, 0, descending=True)
             target_c_sorted = target_c[loss_index]
-            losses.append(torch.dot(loss_c_sorted, torch.autograd.Variable(lovasz_grad(target_c_sorted))))
+            losses.append(torch.dot(loss_c_sorted, Variable(lovasz_grad(target_c_sorted))))
         losses = torch.stack(losses)
 
         if self.reduction == 'none':
@@ -1100,6 +1021,32 @@ class LovaszSoftmax(nn.Module):
         # print(output.shape, target.shape)
         losses = self.lovasz_softmax_flat(output, target)
         return losses
+
+
+#####################################################
+def compute_dtm(img_gt, out_shape, is_label=True):
+    """
+     compute the distance transform map of foreground in ground gruth or prediction.
+     input: segmentation, shape = (batch_size, class, x, y, z)
+     output: the foreground Distance Map (SDM)
+     dtm(x) = 0; x in segmentation boundary
+              inf|x-y|; x in segmentation
+
+    """
+
+    fg_dtm = np.zeros(out_shape)
+
+    for b in range(out_shape[0]):  # batch size
+        for c in range(1, out_shape[1]):  # class; exclude the background class
+            if is_label:
+                posmask = img_gt[b][c].astype(np.bool_)
+            else:
+                posmask = img_gt[b][c] > 0.5
+            if posmask.any():
+                posdis = distance_transform_edt(posmask)
+                fg_dtm[b][c] = posdis
+
+    return fg_dtm
 
 
 def compute_sdf(img_gt, out_shape):
@@ -1149,7 +1096,7 @@ class BoudaryLoss(nn.Module):
         if False: output = softmax_helper(output)
         out_shape = output.shape
 
-        y_onehot = gt2onehot(output, target)  # (b,c,x,y,z)
+        y_onehot = mask2onehot(output, target)  # (b,c,x,y,z)
         gt_sdf = compute_sdf(y_onehot.cpu().numpy(), out_shape)
 
         phi = torch.from_numpy(gt_sdf)
@@ -1164,11 +1111,67 @@ class BoudaryLoss(nn.Module):
         return bd_loss
 
 
+class HDLoss(nn.Module):
+    def __init__(self):
+        """
+        compute haudorff loss for binary segmentation
+        https://arxiv.org/pdf/1904.10030v1.pdf
+        """
+        super(HDLoss, self).__init__()
+
+    def forward(self, output, target):
+        """
+        output: (batch_size, c, x,y,z)
+        target: ground truth, shape: (batch_size, c, x,y,z)
+        """
+        output = softmax_helper(output)
+
+        y_onehot = mask2onehot(output, target)  # (b,c,x,y,z)
+
+        with torch.no_grad():
+            output_shape = output.shape
+            pc_dist = compute_dtm(output.cpu().numpy(), output_shape, is_label=False)
+            gt_dist = compute_dtm(y_onehot.cpu().numpy(), output_shape, is_label=True)
+            dist = pc_dist ** 2 + gt_dist ** 2  # \alpha=2 in eq(8)
+            # print('pc_dist.shape: ', pc_dist.shape, 'gt_dist.shape', gt_dist.shape)
+
+        pred_error = (output - y_onehot) ** 2
+
+        dist = torch.from_numpy(dist)
+        if dist.device != pred_error.device:
+            dist = dist.to(pred_error.device).type(torch.float32)
+
+        two_index = get_einsum_index_original_shape(output_shape)
+        multipled = einsum(two_index, pred_error[:, 1:, ...], dist[:, 1:, ...])
+        hd_loss = multipled.mean()
+
+        return hd_loss
+
+
+class DiceWithHDLoss(nn.Module):
+    def __init__(self, aggregate="sum"):
+        super(DiceWithHDLoss, self).__init__()
+        self.aggregate = aggregate
+        self.dc = SoftDiceLoss(apply_nonlin=softmax_helper)
+        self.hd = HDLoss()
+
+    def forward(self, output, target):
+        dc_loss = self.dc(output, target)
+        hd_loss = self.hd(output, target)
+        if self.aggregate == "sum":
+            with torch.no_grad():
+                alpha = hd_loss / (dc_loss + 1e-5)
+            result = alpha * dc_loss + hd_loss
+        else:
+            raise NotImplementedError("nah son")
+        return result, dc_loss, hd_loss
+
+
 class DiceWithBoundaryLoss(nn.Module):
-    def __init__(self, soft_dice_kwargs, aggregate="sum"):
+    def __init__(self, aggregate="sum"):
         super(DiceWithBoundaryLoss, self).__init__()
         self.aggregate = aggregate
-        self.dc = SoftDiceLoss(apply_nonlin=None, **soft_dice_kwargs)
+        self.dc = SoftDiceLoss(apply_nonlin=softmax_helper)
         self.bd = BoudaryLoss()
 
     def forward(self, output, target, alpha=0.01):
@@ -1199,186 +1202,123 @@ class GeneralizedDiceWithBoundaryLoss(nn.Module):
         return result, dc_loss, bd_loss
 
 
-#####################################################
-def compute_dtm(img_gt, out_shape, is_label=True):
-    """
-     compute the distance transform map of foreground in ground gruth or prediction.
-     input: segmentation, shape = (batch_size, class, x, y, z)
-     output: the foreground Distance Map (SDM)
-     dtm(x) = 0; x in segmentation boundary
-              inf|x-y|; x in segmentation
-
-    """
-
-    fg_dtm = np.zeros(out_shape)
-
-    for b in range(out_shape[0]):  # batch size
-        for c in range(1, out_shape[1]):  # class; exclude the background class
-            if is_label:
-                posmask = img_gt[b][c].astype(np.bool_)
-            else:
-                posmask = img_gt[b][c] > 0.5
-            if posmask.any():
-                posdis = distance_transform_edt(posmask)
-                fg_dtm[b][c] = posdis
-
-    return fg_dtm
-
-
-class HDLoss(nn.Module):
+class DiceWithFocalLoss(nn.Module):
     def __init__(self):
-        """
-        compute haudorff loss for binary segmentation
-        https://arxiv.org/pdf/1904.10030v1.pdf
-        """
-        super(HDLoss, self).__init__()
-
-    def forward(self, output, target):
-        """
-        output: (batch_size, c, x,y,z)
-        target: ground truth, shape: (batch_size, c, x,y,z)
-        """
-        output = softmax_helper(output)
-
-        y_onehot = gt2onehot(output, target)  # (b,c,x,y,z)
-
-        with torch.no_grad():
-            output_shape = output.shape
-            # pc_dist = compute_pred_dtm(output.cpu().numpy(), output.shape)
-            # gt_dist = compute_gt_dtm(y_onehot.cpu().numpy(), output.shape)
-            pc_dist = compute_dtm(output.cpu().numpy(), output_shape, is_label=False)
-            gt_dist = compute_dtm(y_onehot.cpu().numpy(), output_shape, is_label=True)
-            dist = pc_dist ** 2 + gt_dist ** 2  # \alpha=2 in eq(8)
-            # print('pc_dist.shape: ', pc_dist.shape, 'gt_dist.shape', gt_dist.shape)
-
-        pred_error = (output - y_onehot) ** 2
-
-        dist = torch.from_numpy(dist)
-        if dist.device != pred_error.device:
-            dist = dist.to(pred_error.device).type(torch.float32)
-
-        two_index = get_einsum_index_original_shape(output_shape)
-        multipled = einsum(two_index, pred_error[:, 1:, ...], dist[:, 1:, ...])
-        hd_loss = multipled.mean()
-
-        return hd_loss
-
-
-class DiceWithHDLoss(nn.Module):
-    def __init__(self, soft_dice_kwargs, aggregate="sum"):
-        super(DiceWithHDLoss, self).__init__()
-        self.aggregate = aggregate
+        super(DiceWithFocalLoss, self).__init__()
+        soft_dice_kwargs = dict(batch_dice=False, do_bg=True, smooth=1e-5, square=False)
+        focal_kwargs = dict(alpha=None, gamma=2, balance_index=0, smooth=1e-5, size_average=True)
         self.dc = SoftDiceLoss(apply_nonlin=softmax_helper, **soft_dice_kwargs)
-        self.hd = HDLoss()
+        self.focal = FocalLoss(apply_nonlin=softmax_helper, **focal_kwargs)
 
     def forward(self, output, target):
         dc_loss = self.dc(output, target)
-        hd_loss = self.hd(output, target)
+        focal_loss = self.focal(output, target)
+
+        result = dc_loss + focal_loss
+        return result, dc_loss, focal_loss
+
+
+class GeneralizedDiceWithFocalLoss(nn.Module):
+    def __init__(self):
+        super(GeneralizedDiceWithFocalLoss, self).__init__()
+        self.gdc = GeneralizedDiceLossV2(apply_nonlin=softmax_helper)
+        self.bec = BWeightedCrossEntropyLoss()
+        self.focal = FocalLoss(apply_nonlin=softmax_helper)
+        self.smooth = False
+
+    def forward(self, output, target):
+        gdc_loss = self.gdc(output, target)
+        focal_loss = self.focal(output, target)
+
+        bce_l = self.bec(output, target)
+        alpah = 0.8
+        result = gdc_loss + alpah * focal_loss + (1 - alpah) * bce_l
+        if self.smooth:
+            result = log_cosh_smooth(result)
+        return result, gdc_loss, focal_loss
+
+
+class DiceWithCrossentropyNDLoss(nn.Module):
+    def __init__(self, aggregate="sum"):
+        super(DiceWithCrossentropyNDLoss, self).__init__()
+        soft_dice_kwargs = dict(batch_dice=False, do_bg=True, smooth=1e-5, square=False)
+        self.aggregate = aggregate
+        self.ce = CrossentropyND()
+        self.dc = SoftDiceLoss(apply_nonlin=softmax_helper, **soft_dice_kwargs)
+
+    def forward(self, output, target):
+        dc_loss = self.dc(output, target)
+        ce_loss = self.ce(output, target)
         if self.aggregate == "sum":
-            with torch.no_grad():
-                alpha = hd_loss / (dc_loss + 1e-5)
-            result = alpha * dc_loss + hd_loss
+            result = ce_loss + dc_loss
         else:
-            raise NotImplementedError("nah son")
-        return result, dc_loss, hd_loss
+            raise NotImplementedError("nah son")  # reserved for other stuff (later)
+        return result, dc_loss, ce_loss
 
 
-def GeneralizedDiceLossV3(output, target, eps=1e-5, weight_type='square'):  # Generalized dice loss
-    """
-        该实现方式更容易理解多分类问题
-        Generalised Dice : 'Generalised dice overlap as a deep learning loss function for highly unbalanced segmentations'
-    """
+class DiceWithBCELoss(nn.Module):
+    def __init__(self):
+        super(DiceWithBCELoss, self).__init__()
+        self.dc = SoftDiceLoss(apply_nonlin=softmax_helper)
+        self.bec = BWeightedCrossEntropyLoss()
 
-    # target = target.float()
-
-    if target.dim() == 4:
-        target[target == 4] = 3  # label [2] -> [0]
-        target = expand_target(target, n_class=output.size()[1])  # [N,H,W,D] -> [N,1，H,W,D]
-
-    # output = flatten(output)[1:, ...]  # transpose [N,1，H,W,D] -> [1，N,H,W,D] -> [3, N*H*W*D] voxels
-    output = flatten(output)[0:, ...]  # transpose [N,1，H,W,D] -> [1，N,H,W,D] -> [3, N*H*W*D] voxels
-    target = flatten(target)[0:, ...]  # [class, N*H*W*D]
-
-    target_sum = target.sum(-1)  # sub_class_voxels [3,1] -> 3个voxels
-    if weight_type == 'square':
-        class_weights = 1. / (target_sum * target_sum + eps)
-    elif weight_type == 'identity':
-        class_weights = 1. / (target_sum + eps)
-    elif weight_type == 'sqrt':
-        class_weights = 1. / (torch.sqrt(target_sum) + eps)
-    else:
-        raise ValueError('Check out the weight_type :', weight_type)
-
-    intersect = (output * target).sum(-1)
-    intersect_sum = (intersect * class_weights).sum()
-    denominator = (output + target).sum(-1)
-    denominator_sum = (denominator * class_weights).sum() + eps
-    # print("intersect_sum:{},\tdenominator_sum:{}".format(intersect_sum.data, denominator_sum.data))
-    loss = 1 - 2. * (intersect_sum / denominator_sum)
-
-    if len(intersect) == 3:
-        loss1 = 2 * intersect[0] / (denominator[0] + eps)
-        loss2 = 2 * intersect[1] / (denominator[1] + eps)
-        loss3 = 2 * intersect[2] / (denominator[2] + eps)
-        print(
-            '\n0:{:.4f} | 1:{:.4f} | 2:{:.4f} | - | Total loss:{:.4f}'.format(loss1.data, loss2.data, loss3.data,
-                                                                              loss.data))
-
-    return loss
+    def forward(self, output, target):
+        dc_loss = self.dc(output, target)
+        ce_loss = self.bec(output, target)
+        result = ce_loss + dc_loss
+        return result, dc_loss, ce_loss
 
 
-def expand_target(x, n_class, mode='softmax'):
-    """
-        Converts NxDxHxW label image to NxCxDxHxW, where each label is stored in a separate channel
-        :param input: 4D input image (NxDxHxW)
-        :param C: number of channels/labels
-        :return: 5D output image (NxCxDxHxW)
-    """
-    assert x.dim() == 4
+class GeneralizedDiceWithBCELoss(nn.Module):
+    def __init__(self):
+        super(GeneralizedDiceWithBCELoss, self).__init__()
+        self.gdc = GeneralizedDiceLossV2(apply_nonlin=softmax_helper)
+        self.bec = BWeightedCrossEntropyLoss()
 
-    shape = list(x.size())
-    shape.insert(1, n_class)
-    shape = tuple(shape)
-    xx = torch.zeros(shape)
-    if mode.lower() == 'softmax':
-        for c in range(n_class):
-            if c == 1:
-                xx[:, c, :, :, :] = (x >= c)  # 动脉+动脉瘤
-            else:
-                xx[:, c, :, :, :] = (x == c)
+    def forward(self, output, target):
+        gdc_loss = self.gdc(output, target)
+        ce_loss = self.bec(output, target)
+        result = ce_loss + gdc_loss
+        return result, gdc_loss, ce_loss
 
-    if mode.lower() == 'sigmoid':
-        xx[:, 0, :, :, :] = (x == 0)
-        xx[:, 1, :, :, :] = (x == 1)
-        xx[:, 2, :, :, :] = (x == 3)
-    return xx.to(x.device)
 
+# 'TopKThreshold','TopKLoss',"DiceWithTopKLoss",
+
+__all__ = ['FocalLoss', 'CrossentropyND', 'CrossentropyNDTopK', 'BWeightedCrossEntropyLoss',
+           'WeightedCrossEntropyLoss', 'WeightedCrossEntropyLossV2', 'TopKLoss', 'TopKThreshold',
+           'TverskyLoss', 'AsymLoss', 'DistPenalizedCE',
+           'PenaltyGeneralizedDiceLoss', 'SensitivitySpecifityLoss',
+           'SoftDiceLoss', 'SoftDiceLossV2', 'IoULoss',
+           'GeneralizedDiceLoss', 'GeneralizedDiceLossV2', 'GeneralizedDiceLossV3',
+           'ExpLogLoss', 'LovaszSoftmax', 'BoudaryLoss', 'HDLoss', 'FocalTverskyLoss',
+           'DiceWithHDLoss', 'DiceWithBoundaryLoss', 'DiceWithBCELoss', 'DiceWithFocalLoss',
+           'GeneralizedDiceWithBoundaryLoss', 'GeneralizedDiceWithBCELoss', 'GeneralizedDiceWithFocalLoss',
+           'DiceWithCrossentropyNDLoss']
 
 if __name__ == "__main__":
-    output = torch.zeros(2, 2, 64, 64, 64)
-    output[:, 0, 10:20, 10:20, 10:20] = 0
+    import logging
+
+    # 获取logger实例，如果参数为空则返回root logger
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.INFO)
+
+    output = torch.zeros(2, 3, 64, 64, 64, device="cpu")
     output[:, 1, 12:20, 12:20, 12:20] = 1
+    output[:, 2, 8:10, 8:10, 8:10] = 1
 
-    target = torch.zeros(2, 64, 64, 64)
-    # target[:, 5:15, 5:15, 5:15] = 1
+    target = torch.zeros(2, 64, 64, 64, device="cpu")
     target[:, 10:20, 10:20, 10:20] = 1
+    target[:, 8:10, 8:10, 8:10] = 2
 
-    # dice_loss = SoftDiceLoss(smooth=1e-5)
-    # dice_lv = dice_loss(output, target)
-    # print(dice_lv)
-    #
-    # gdl = GeneralizedDiceLoss()
-    # dice_lv = gdl(output, target)
-    # print(dice_lv)
-    # BDL = BoudaryLoss()
-    # print(BDL(output, target))
-    # para = dict(batch_dice=False, do_bg=True, smooth=1e-5)
-    # DBDL = DiceWithBoundaryLoss(para)
-    # print(DBDL(output, target))
-    # DHDL = DiceWithHDLoss(para)
-    # print(DHDL(output, target))
-    # GDBL = GeneralizedDiceWithBoundaryLoss()
-    # print(GDBL(output, target))
-
-    GDFL = GeneralizedDiceWithFocalLoss()
-    print(GDFL(output, target))
+    # print(TopKLoss()(output, target))
+    print(len(__all__))
+    for i in range(len(__all__)):
+        criterion = eval(__all__[i])
+        loss_val = criterion()(output, target)
+        if isinstance(loss_val, tuple):
+            loss_total, loss1, loss2 = loss_val
+            logger.info(
+                "\t{}:\t\t\tTotal:{:.4f} | loss1:{:.4f} | loss2:{:.4f}".format(__all__[i], loss_total.data, loss1.data,
+                                                                               loss2.data))
+        else:
+            logger.info("\t{}:\t\t\t{:.4f}".format(__all__[i], loss_val.data))

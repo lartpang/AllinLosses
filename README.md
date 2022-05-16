@@ -54,7 +54,94 @@ git clone https://github.com/axjing/AllinLosses.git
 from AllinLosses import *
 ```
 
-3. Instantiation Testing
+3. **测试所有损失函数**
+
+```python
+# test.py
+# python3
+# @File: log.py
+# --coding:utf-8--
+# @Author:axjing
+# @Time: 2021年09月16日17
+# 说明:
+
+from segment_losses import __all__
+from segment_losses import *
+import torch
+print(__all__)
+
+if __name__ == '__main__':
+    import logging
+
+    # 获取logger实例，如果参数为空则返回root logger
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.INFO)
+
+    output = torch.zeros(2, 3, 64, 64, 64, device="cpu")
+    output[:, 1, 12:20, 12:20, 12:20] = 1
+    output[:, 2, 8:10, 8:10, 8:10] = 1
+
+    target = torch.zeros(2, 64, 64, 64, device="cpu")
+    target[:, 10:20, 10:20, 10:20] = 1
+    target[:, 8:10, 8:10, 8:10] = 2
+
+    # print(TopKLoss()(output, target))
+    print(len(__all__))
+    for i in range(len(__all__)):
+        criterion = eval(__all__[i])
+        loss_val = criterion()(output, target)
+        if isinstance(loss_val, tuple):
+            loss_total, loss1, loss2 = loss_val
+            logger.info(
+                "\t{}:\t\t\tTotal:{:.4f} | loss1:{:.4f} | loss2:{:.4f}".format(__all__[i], loss_total.data, loss1.data,
+                                                                               loss2.data))
+        else:
+            logger.info("\t{}:\t\t\t{:.4f}".format(__all__[i], loss_val.data))
+    print("*" * 30 + "\n |\t\tEnd Of Program\t\t|\n" + "*" * 30)
+```
+**OUTPUT:**
+```python
+['FocalLoss', 'CrossentropyND', 'CrossentropyNDTopK', 'BWeightedCrossEntropyLoss', 'WeightedCrossEntropyLoss', 'WeightedCrossEntropyLossV2', 'TopKLoss', 'TopKThreshold', 'TverskyLoss', 'AsymLoss', 'DistPenalizedCE', 'PenaltyGeneralizedDiceLoss', 'SensitivitySpecifityLoss', 'SoftDiceLoss', 'SoftDiceLossV2', 'IoULoss', 'GeneralizedDiceLoss', 'GeneralizedDiceLossV2', 'GeneralizedDiceLossV3', 'ExpLogLoss', 'LovaszSoftmax', 'BoudaryLoss', 'HDLoss', 'FocalTverskyLoss', 'DiceWithHDLoss', 'DiceWithBoundaryLoss', 'DiceWithBCELoss', 'DiceWithFocalLoss', 'GeneralizedDiceWithBoundaryLoss', 'GeneralizedDiceWithBCELoss', 'GeneralizedDiceWithFocalLoss', 'DiceWithCrossentropyNDLoss']
+32
+INFO:__main__:  FocalLoss:                      11.4899
+INFO:__main__:  CrossentropyND:                 1.0975
+INFO:__main__:  CrossentropyNDTopK:                     1.0975
+INFO:__main__:  BWeightedCrossEntropyLoss:                      0.6929
+INFO:__main__:  WeightedCrossEntropyLoss:                       1.0975
+INFO:__main__:  WeightedCrossEntropyLossV2:                     1.0975
+C:\Users\axjing\anaconda3\envs\jing\lib\site-packages\torch\nn\_reduction.py:42: UserWarning: size_average and reduce args will be deprecated, please use reduction='none' instead.
+  warnings.warn(warning.format(ret))
+INFO:__main__:  TopKLoss:                       1.0986
+INFO:__main__:  TopKThreshold:                  nan
+INFO:__main__:  TverskyLoss:                    0.4666
+INFO:__main__:  AsymLoss:                       0.4657
+INFO:__main__:  DistPenalizedCE:                        1.0975
+INFO:__main__:  PenaltyGeneralizedDiceLoss:                     0.9996
+INFO:__main__:  SensitivitySpecifityLoss:                       0.0496
+INFO:__main__:  SoftDiceLoss:                   0.4409
+INFO:__main__:  SoftDiceLossV2:                 0.4409
+INFO:__main__:  IoULoss:                        0.4958
+INFO:__main__:  GeneralizedDiceLoss:                    0.0019
+INFO:__main__:  GeneralizedDiceLossV2:                  0.0020
+INFO:__main__:  GeneralizedDiceLossV3:                  0.0020
+INFO:__main__:  ExpLogLoss:                     1.9782
+INFO:__main__:  LovaszSoftmax:                  0.4960
+INFO:__main__:  BoudaryLoss:                    -0.0019
+INFO:__main__:  HDLoss:                 0.0025
+INFO:__main__:  FocalTverskyLoss:                       1.3327
+INFO:__main__:  DiceWithHDLoss:                 Total:0.0049 | loss1:0.8300 | loss2:0.0025
+INFO:__main__:  DiceWithBoundaryLoss:                   Total:0.0065 | loss1:0.8300 | loss2:-0.0019
+INFO:__main__:  DiceWithBCELoss:                        Total:1.5229 | loss1:0.8300 | loss2:0.6929
+INFO:__main__:  DiceWithFocalLoss:                      Total:1.3175 | loss1:0.8300 | loss2:0.4875
+INFO:__main__:  GeneralizedDiceWithBoundaryLoss:                        Total:-0.0018 | loss1:0.0020 | loss2:-0.0019
+INFO:__main__:  GeneralizedDiceWithBCELoss:                     Total:1.6928 | loss1:0.9999 | loss2:0.6929
+INFO:__main__:  GeneralizedDiceWithFocalLoss:                   Total:1.5285 | loss1:0.9999 | loss2:0.4875
+INFO:__main__:  DiceWithCrossentropyNDLoss:                     Total:1.9275 | loss1:0.8300 | loss2:1.0975
+******************************
+ |              End Of Program          |
+******************************
+```
+4. 使用方法
 
 ```python
 from AllinLosses.segment_losses import *
@@ -86,9 +173,10 @@ if __name__ == "__main__":
 
     GDFL=GeneralizedDiceWithFocalLoss()
     print(GDFL(output, target))
-# TODO ToDel
 
 ```
+
+## 不同损失函数使用场景->待更新
 
 ## 关于loss函数的讲解：
 - [损失函数优缺点适用场景对比分析](https://mp.weixin.qq.com/s/hrxFWmPdZkZmyA9PdJZkxw)

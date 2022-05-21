@@ -1,0 +1,6 @@
+numpy         ==  1.21.2
+pillow        ==  8.4.0
+pytorch       ==  1.8.2
+scikit-image  ==  0.18.3
+scikit-learn  ==  1.0.1
+scipy         ==  1.7.2

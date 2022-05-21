@@ -46,6 +46,8 @@ TODO:
 1. **clone**
 ```shell
 git clone https://github.com/axjing/AllinLosses.git
+cd ./AllinLosses
+pip install -r requirements.txt
 ```
 
 2. **import**
